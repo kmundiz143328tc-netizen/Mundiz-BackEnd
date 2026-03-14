@@ -2,97 +2,96 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Student;
 use App\Models\Course;
 use App\Models\SchoolDay;
-use App\Models\Student;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class DashboardController extends Controller
 {
-    /**
-     * Get all dashboard summary statistics.
-     */
     public function stats()
     {
-        $totalStudents    = Student::count();
-        $activeStudents   = Student::where('status', 'Active')->count();
-        $totalCourses     = Course::count();
-        $totalSchoolDays  = SchoolDay::where('day_type', 'class')->count();
-        $avgAttendance    = SchoolDay::where('day_type', 'class')->avg('attendance_rate');
-
         return response()->json([
-            'total_students'   => $totalStudents,
-            'active_students'  => $activeStudents,
-            'total_courses'    => $totalCourses,
-            'total_school_days'=> $totalSchoolDays,
-            'avg_attendance'   => round($avgAttendance, 2),
+            'total_students'    => Student::count(),
+            'active_students'   => Student::where('status', 'Active')->count(),
+            'total_courses'     => Course::count(),
+            'total_school_days' => SchoolDay::where('day_type', 'class')->count(),
+            'avg_attendance'    => round(
+                SchoolDay::where('day_type', 'class')->avg('attendance_rate') ?? 0, 1
+            ),
         ]);
     }
 
-    /**
-     * Monthly enrollment data for Bar Chart.
-     */
     public function enrollmentTrends()
     {
-        $data = Student::selectRaw("DATE_FORMAT(enrollment_date, '%b %Y') as month,
-                                    DATE_FORMAT(enrollment_date, '%Y-%m') as sort_key,
-                                    COUNT(*) as students")
-            ->groupBy('month', 'sort_key')
-            ->orderBy('sort_key')
-            ->get()
-            ->map(fn($item) => [
-                'month'    => $item->month,
-                'students' => $item->students,
-            ]);
-
-        return response()->json($data);
+        try {
+            return response()->json(
+                Student::select(
+                    DB::raw("DATE_FORMAT(enrollment_date, '%b %Y') as month"),
+                    DB::raw("DATE_FORMAT(enrollment_date, '%Y-%m') as sort_key"),
+                    DB::raw('COUNT(*) as students')
+                )
+                ->whereNotNull('enrollment_date')
+                ->groupBy('month', 'sort_key')
+                ->orderBy('sort_key')
+                ->get()
+                ->map(fn($r) => ['month' => $r->month, 'students' => $r->students])
+            );
+        } catch (\Exception $e) {
+            return response()->json([]);
+        }
     }
 
-    /**
-     * Student distribution per course for Pie Chart.
-     */
     public function courseDistribution()
     {
-        $data = Course::withCount('students')
-            ->orderByDesc('students_count')
-            ->get()
-            ->map(fn($c) => [
-                'name'  => $c->course_code,
-                'label' => $c->course_name,
-                'value' => $c->students_count,
-            ]);
-
-        return response()->json($data);
+        return response()->json(
+            Student::select('course_id', DB::raw('COUNT(*) as value'))
+                ->with('course:id,course_name,course_code')
+                ->whereNotNull('course_id')
+                ->groupBy('course_id')
+                ->orderByDesc('value')
+                ->get()
+                ->map(fn($s) => [
+                    'name'  => $s->course?->course_code ?? 'Unknown',
+                    'label' => $s->course?->course_name ?? 'Unknown',
+                    'value' => (int) $s->value,
+                ])
+        );
     }
 
-    /**
-     * Attendance over school days for Line Chart.
-     */
     public function attendanceTrends()
     {
-        $data = SchoolDay::where('day_type', 'class')
-            ->orderBy('date')
-            ->get()
-            ->map(fn($day) => [
-                'date'            => $day->date->format('M d'),
-                'attendance_rate' => $day->attendance_rate,
-                'present'         => $day->students_present,
-                'absent'          => $day->students_absent,
-            ]);
-
-        return response()->json($data);
+        return response()->json(
+            SchoolDay::where('day_type', 'class')
+                ->select('date', 'attendance_rate', 'students_present', 'students_absent')
+                ->orderBy('date')
+                ->get()
+        );
     }
 
-    /**
-     * Upcoming events and holidays.
-     */
     public function calendar()
     {
-        $data = SchoolDay::whereIn('day_type', ['holiday', 'event'])
-            ->orderBy('date')
-            ->take(20)
-            ->get();
+        return response()->json(
+            SchoolDay::whereIn('day_type', ['holiday', 'event', 'suspension'])
+                ->orderBy('date')
+                ->get()
+        );
+    }
 
-        return response()->json($data);
+    public function departmentStats()
+    {
+        return response()->json(
+            Student::select(
+                'department',
+                DB::raw('COUNT(*) as total'),
+                DB::raw("SUM(CASE WHEN status='Active' THEN 1 ELSE 0 END) as active"),
+                DB::raw("SUM(CASE WHEN status='Graduated' THEN 1 ELSE 0 END) as graduated")
+            )
+            ->whereNotNull('department')
+            ->groupBy('department')
+            ->orderByDesc('total')
+            ->get()
+        );
     }
 }
